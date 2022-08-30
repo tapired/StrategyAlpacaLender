@@ -15,7 +15,8 @@ def test_migration(
     strategist,
     gov,
     user,
-    RELATIVE_APPROX,
+    prepare_trade_factory,
+    RELATIVE_APPROX
 ):
     # Deposit to the vault and harvest
     token.approve(vault.address, amount, {"from": user})

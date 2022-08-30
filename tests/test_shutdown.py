@@ -6,7 +6,7 @@ import pytest
 
 
 def test_vault_shutdown_can_withdraw(
-    chain, token, vault, strategy, user, amount, RELATIVE_APPROX
+    chain, token, vault, strategy, user, amount, prepare_trade_factory, RELATIVE_APPROX
 ):
     ## Deposit in Vault
     token.approve(vault.address, amount, {"from": user})
@@ -32,7 +32,7 @@ def test_vault_shutdown_can_withdraw(
 
 
 def test_basic_shutdown(
-    chain, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX
+    chain, token, vault, strategy, user, strategist, amount, prepare_trade_factory, RELATIVE_APPROX
 ):
     # Deposit to the vault
     token.approve(vault.address, amount, {"from": user})

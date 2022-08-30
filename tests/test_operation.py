@@ -4,7 +4,7 @@ import pytest
 
 
 def test_operation(
-    chain, accounts, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX
+    chain, accounts, token, vault, strategy, user, strategist, amount, prepare_trade_factory, RELATIVE_APPROX
 ):
     # Deposit to the vault
     user_balance_before = token.balanceOf(user)
@@ -28,7 +28,7 @@ def test_operation(
 
 
 def test_emergency_exit(
-    chain, accounts, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX
+    chain, accounts, token, vault, strategy, user, strategist, amount, prepare_trade_factory, RELATIVE_APPROX
 ):
     # Deposit to the vault
     token.approve(vault.address, amount, {"from": user})
@@ -45,7 +45,7 @@ def test_emergency_exit(
 
 
 def test_profitable_harvest(
-    chain, accounts, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX
+    chain, accounts, token, vault, strategy, user, strategist, amount, prepare_trade_factory, RELATIVE_APPROX
 ):
     # Deposit to the vault
     token.approve(vault.address, amount, {"from": user})
@@ -71,7 +71,7 @@ def test_profitable_harvest(
 
 
 def test_change_debt(
-    chain, gov, token, vault, strategy, user, strategist, amount, RELATIVE_APPROX
+    chain, gov, token, vault, strategy, user, strategist, amount, prepare_trade_factory, RELATIVE_APPROX
 ):
     # Deposit to the vault and harvest
     token.approve(vault.address, amount, {"from": user})
@@ -96,33 +96,33 @@ def test_change_debt(
     # assert pytest.approx(strategy.estimatedTotalAssets(), rel=RELATIVE_APPROX) == half
 
 
-def test_sweep(gov, vault, strategy, token, user, amount, weth, weth_amout):
-    # Strategy want token doesn't work
-    token.transfer(strategy, amount, {"from": user})
-    assert token.address == strategy.want()
-    assert token.balanceOf(strategy) > 0
-    with brownie.reverts("!want"):
-        strategy.sweep(token, {"from": gov})
-
-    # Vault share token doesn't work
-    with brownie.reverts("!shares"):
-        strategy.sweep(vault.address, {"from": gov})
-
-    # TODO: If you add protected tokens to the strategy.
-    # Protected token doesn't work
-    # with brownie.reverts("!protected"):
-    #     strategy.sweep(strategy.protectedToken(), {"from": gov})
-
-    before_balance = weth.balanceOf(gov)
-    weth.transfer(strategy, weth_amout, {"from": user})
-    assert weth.address != strategy.want()
-    assert weth.balanceOf(user) == 0
-    strategy.sweep(weth, {"from": gov})
-    assert weth.balanceOf(gov) == weth_amout + before_balance
+# def test_sweep(gov, vault, strategy, token, user, amount, weth, weth_amout):
+#     # Strategy want token doesn't work
+#     token.transfer(strategy, amount, {"from": user})
+#     assert token.address == strategy.want()
+#     assert token.balanceOf(strategy) > 0
+#     with brownie.reverts("!want"):
+#         strategy.sweep(token, {"from": gov})
+#
+#     # Vault share token doesn't work
+#     with brownie.reverts("!shares"):
+#         strategy.sweep(vault.address, {"from": gov})
+#
+#     # TODO: If you add protected tokens to the strategy.
+#     # Protected token doesn't work
+#     # with brownie.reverts("!protected"):
+#     #     strategy.sweep(strategy.protectedToken(), {"from": gov})
+#
+#     before_balance = weth.balanceOf(gov)
+#     weth.transfer(strategy, weth_amout, {"from": user})
+#     assert weth.address != strategy.want()
+#     assert weth.balanceOf(user) == 0
+#     strategy.sweep(weth, {"from": gov})
+#     assert weth.balanceOf(gov) == weth_amout + before_balance
 
 
 def test_triggers(
-    chain, gov, vault, strategy, token, amount, user, weth, weth_amout, strategist
+    chain, gov, vault, strategy, token, amount, user, strategist, prepare_trade_factory
 ):
     # Deposit to the vault and harvest
     token.approve(vault.address, amount, {"from": user})

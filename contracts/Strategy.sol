@@ -1,47 +1,209 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Feel free to change the license, but this is what we use
 
-// Feel free to change this version of Solidity. We support >=0.6.0 <0.7.0;
-pragma solidity 0.6.12;
+pragma solidity ^0.8.12;
 pragma experimental ABIEncoderV2;
 
 // These are the core Yearn libraries
-import {
-    BaseStrategy,
-    StrategyParams
-} from "@yearnvaults/contracts/BaseStrategy.sol";
-import {
-    SafeERC20,
-    SafeMath,
-    IERC20,
-    Address
-} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import {BaseStrategy, StrategyParams} from "@yearnvaults/contracts/BaseStrategy.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IERC20Metadata} from "@yearnvaults/contracts/yToken.sol";
+
+import {IibToken} from "../interfaces/alpaca/IibToken.sol";
+import {IFairLaunch} from "../interfaces/alpaca/IFairLaunch.sol"; // a.k.a masterchef
+import {ITradeFactory} from "../interfaces/ySwaps/ITradeFactory.sol";
+import {INative} from "../interfaces/native/INative.sol";
+import {IAggregatorV3} from "../interfaces/chainlink/IAggregatorV3.sol";
 
 contract Strategy is BaseStrategy {
     using SafeERC20 for IERC20;
     using Address for address;
-    using SafeMath for uint256;
 
-    constructor(address _vault) public BaseStrategy(_vault) {
-        // You can set these parameters on deployment to whatever you want
-        // maxReportDelay = 6300;
-        // profitFactor = 100;
-        // debtThreshold = 0;
+    IibToken public ibToken;
+    uint256 public farmId;
+    IFairLaunch public alpacaFarm = IFairLaunch(0x838B7F64Fa89d322C563A6f904851A13a164f84C);
+
+    // reward token
+    IERC20 public constant ALPACA_TOKEN = IERC20(0xaD996A45fd2373ed0B10Efa4A8eCB9de445A4302);
+
+    // want/usd price feed, setted at constructor
+    // if setted as address(0) it will default to 1e18 (DAI/USDC/USDT cases)
+    IAggregatorV3 private immutable WANT_PRICE_FEED;
+
+    // alpaca/usd price feed
+    IAggregatorV3 private constant ALPACA_PRICE_FEED = IAggregatorV3(0x95d3FFf86A754AB81A7c59FcaB1468A2076f8C9b);
+
+    // keeper stuff
+    // 18 decimal dolar value (like DAI)
+    uint256 public harvestProfitMin; // minimum size in dolars (18 decimals) that we want to harvest
+    uint256 public harvestProfitMax; // maximum size in dolars (18 decimals) that we want to harvest
+    uint256 public creditThreshold; // amount of credit in underlying tokens that will automatically trigger a harvest
+    uint256 public lastTimeETA; // what was the estimated total assets at the latest harvest
+    bool internal forceHarvestTriggerOnce; // only set this to true when we want to trigger our keepers to harvest for us
+
+    address public tradeFactory = address(0);
+
+    constructor(address _vault, address _ibToken, uint256 _farmId, address _WANT_PRICE_FEED) BaseStrategy(_vault) {
+      require(IibToken(_ibToken).token() == address(want), 'IB token underlying is not want');
+      require(address(alpacaFarm.stakingToken(_farmId)) == address(_ibToken), 'Wrong ID');
+
+      ibToken = IibToken(_ibToken);
+      farmId = _farmId;
+
+      WANT_PRICE_FEED = IAggregatorV3(_WANT_PRICE_FEED);
+      harvestProfitMin = 0; // idk what to set here
+      harvestProfitMax = 300 * 1e18; // idk what to set here aswell
+      creditThreshold = 10_000 * 1e18; // idk what to set here aswell
+      maxReportDelay = 21 days; // 21 days in seconds, if we hit this then harvestTrigger = True
+
+      IERC20(want).approve(_ibToken, type(uint256).max);
+      IERC20(_ibToken).approve(address(alpacaFarm), type(uint256).max);
     }
 
     // ******** OVERRIDE THESE METHODS FROM BASE CONTRACT ************
 
     function name() external view override returns (string memory) {
-        // Add your own name here, suggestion e.g. "StrategyCreamYFI"
-        return "Strategy<ProtocolName><TokenType>";
+        return
+            string(
+                abi.encodePacked(
+                    "StrategyAlpacaLender",
+                    IERC20Metadata(address(want)).symbol()
+                )
+            );
+    }
+
+    function balanceOfToken(address _token) public view returns (uint256) {
+      return IERC20(_token).balanceOf(address(this));
+    }
+
+    function balanceOfWant() public view returns (uint256) {
+      return want.balanceOf(address(this));
+    }
+
+    function balanceOfLP() public view returns (uint256) {
+      return IERC20(address(ibToken)).balanceOf(address(this));
+    }
+
+    function balanceOfLPInFarm() public view returns (uint256) {
+      return alpacaFarm.userInfo(farmId, address(this)).amount;
+    }
+
+    function getVirtualPrice() public view returns (uint256) {
+      return (ibToken.totalToken() * 1e18) / ibToken.totalSupply();
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
-        // TODO: Build a more accurate estimate using the value of all positions in terms of `want`
-        return want.balanceOf(address(this));
+        return (balanceOfLPInFarm() * getVirtualPrice()) / 1e18;
+    }
+
+    function pendingALPACA() public view returns (uint256) {
+      return alpacaFarm.pendingAlpaca(farmId, address(this));
+    }
+
+    // return 18 decimal 1 want token price in terms of USD
+    // if price feed address is 0 this will default return 1e18 (DAI/USDC/USDT cases)
+    function getWantToUSD() public view returns (uint256) {
+      if (address(WANT_PRICE_FEED) == address(0)) return 1e18;
+      (
+            ,
+            /*uint80 roundID*/
+            int256 price, /*uint startedAt*/ /*uint timeStamp*/
+            ,
+            ,
+
+        ) = /*uint80 answeredInRound*/
+            WANT_PRICE_FEED.latestRoundData();
+        uint256 decimals = WANT_PRICE_FEED.decimals();
+        return uint256(price) * 10**(18 - decimals);
+    }
+
+    // return 18 decimal 1 alpaca price in terms of USD
+    function getAlpacaToUSD() public view returns (uint256) {
+      (
+            ,
+            /*uint80 roundID*/
+            int256 price, /*uint startedAt*/ /*uint timeStamp*/
+            ,
+            ,
+
+        ) = /*uint80 answeredInRound*/
+            ALPACA_PRICE_FEED.latestRoundData();
+        uint256 decimals = ALPACA_PRICE_FEED.decimals();
+        return uint256(price) * 10**(18 - decimals);
+    }
+
+    // 18 decimal dolar value of profits
+    function claimableProfitInUSD() public view returns (uint256) {
+      uint256 alpacasToUSD = (getAlpacaToUSD() * pendingALPACA()) / 1e18; // 18 decimal
+      uint256 swapFeeProfitsToUSD = estimatedTotalAssets() - lastTimeETA; // if underflow then dont harvest its too soon
+
+      swapFeeProfitsToUSD = (swapFeeProfitsToUSD * getWantToUSD()) / 1e18; // in USD
+      return swapFeeProfitsToUSD + alpacasToUSD;
+    }
+
+    /* ========== KEEP3RS ========== */
+    // use this to determine when to harvest
+    function harvestTrigger(uint256 callCostinEth)
+        public
+        view
+        override
+        returns (bool)
+    {
+        // Should not trigger if strategy is not active (no assets and no debtRatio). This means we don't need to adjust keeper job.
+        if (!isActive()) {
+            return false;
+        }
+
+        // harvest if we have a profit to claim at our upper limit without considering gas price
+        uint256 claimableProfit = claimableProfitInUSD();
+        if (claimableProfit > harvestProfitMax) {
+            return true;
+        }
+
+        // check if the base fee gas price is higher than we allow. if it is, block harvests.
+        // ASK: this is FTM chain is this necessary?
+        // if (!isBaseFeeAcceptable()) {
+        //     return false;
+        // }
+
+        // trigger if we want to manually harvest, but only if our gas price is acceptable
+        if (forceHarvestTriggerOnce) {
+            return true;
+        }
+
+        // harvest if we have a sufficient profit to claim, but only if our gas price is acceptable
+        if (claimableProfit > harvestProfitMin) {
+            return true;
+        }
+
+        StrategyParams memory params = vault.strategies(address(this));
+        // harvest no matter what once we reach our maxDelay
+        if ((block.timestamp - params.lastReport) > maxReportDelay) {
+            return true;
+        }
+
+        // harvest our credit if it's above our threshold
+        if (vault.creditAvailable() > creditThreshold) {
+            return true;
+        }
+
+        // otherwise, we don't harvest
+        return false;
+    }
+
+    // Min profit to start checking for harvests if gas is good, max will harvest no matter gas (both in USDT, 6 decimals). Credit threshold is in want token, and will trigger a harvest if credit is large enough. check earmark to look at convex's booster.
+    function setHarvestTriggerParams(
+        uint256 _harvestProfitMin,
+        uint256 _harvestProfitMax,
+        uint256 _creditThreshold
+    ) external onlyVaultManagers {
+        harvestProfitMin = _harvestProfitMin;
+        harvestProfitMax = _harvestProfitMax;
+        creditThreshold = _creditThreshold;
     }
 
     function prepareReturn(uint256 _debtOutstanding)
@@ -53,14 +215,72 @@ contract Strategy is BaseStrategy {
             uint256 _debtPayment
         )
     {
-        // TODO: Do stuff here to free up any returns back into `want`
-        // NOTE: Return `_profit` which is value generated by all positions, priced in `want`
-        // NOTE: Should try to free up at least `_debtOutstanding` of underlying position
+        require(tradeFactory != address(0), "Trade factory must be set.");
+
+        uint256 debt = vault.strategies(address(this)).totalDebt;
+        uint256 assets = estimatedTotalAssets();
+        if (debt > assets) {
+          unchecked {
+            _loss = debt - assets;
+          }
+        } else {
+          unchecked {
+            _profit = assets - debt;
+          }
+        }
+
+        uint256 toLiquidate = _debtOutstanding + _profit;
+        if (toLiquidate > 0) {
+            (uint256 _amountFreed, uint256 _withdrawalLoss) =
+            liquidatePosition(toLiquidate);
+            _debtPayment = Math.min(_debtOutstanding, _amountFreed);
+            _loss = _loss + _withdrawalLoss;
+        }
+
+        lastTimeETA = estimatedTotalAssets(); // for keepers
+
+        // net out PnL
+        if (_profit > _loss) {
+            unchecked {
+              _profit = _profit - _loss;
+            }
+            _loss = 0;
+        } else {
+            unchecked {
+              _loss = _loss - _profit;
+            }
+            _profit = 0;
+        }
+
     }
 
     function adjustPosition(uint256 _debtOutstanding) internal override {
-        // TODO: Do something to invest excess `want` tokens (from the Vault) into your positions
-        // NOTE: Try to adjust positions so that `_debtOutstanding` can be freed up on *next* harvest (not immediately)
+       uint256 wantBalance = balanceOfWant();
+       if (wantBalance > _debtOutstanding) {
+           // supply to the pool get more ib tokens
+           unchecked {
+             uint256 toDeposit = wantBalance - _debtOutstanding;
+             ibToken.deposit(toDeposit);
+           }
+       }
+       uint256 ibTokenBal = balanceOfLP();
+       if (ibTokenBal > 0) {
+           // stake ib Tokens to earn ALPACA
+           alpacaFarm.deposit(address(this), farmId, ibTokenBal);
+       }
+    }
+
+    function _claimRewards() internal {
+        if (pendingALPACA() > 0) {
+          alpacaFarm.harvest(farmId);
+        }
+        else {
+          revert('No rewards to claim');
+        }
+    }
+
+    function claimRewards() external onlyVaultManagers {
+        _claimRewards();
     }
 
     function liquidatePosition(uint256 _amountNeeded)
@@ -68,50 +288,68 @@ contract Strategy is BaseStrategy {
         override
         returns (uint256 _liquidatedAmount, uint256 _loss)
     {
-        // TODO: Do stuff here to free up to `_amountNeeded` from all positions back into `want`
-        // NOTE: Maintain invariant `want.balanceOf(this) >= _liquidatedAmount`
-        // NOTE: Maintain invariant `_liquidatedAmount + _loss <= _amountNeeded`
+      uint256 wantBalance = balanceOfWant();
+      if (wantBalance > _amountNeeded) {
+          // if there is enough free want, let's use it
+          return (_amountNeeded, 0);
+      }
 
-        uint256 totalAssets = want.balanceOf(address(this));
-        if (_amountNeeded > totalAssets) {
-            _liquidatedAmount = totalAssets;
-            _loss = _amountNeeded.sub(totalAssets);
-        } else {
-            _liquidatedAmount = _amountNeeded;
-        }
+      // we need to free funds
+      unchecked {
+        uint256 amountRequired = _amountNeeded - wantBalance;
+        _withdrawSome(amountRequired);
+      }
+      uint256 freeAssets = balanceOfWant();
+      if (_amountNeeded > freeAssets) {
+          _liquidatedAmount = freeAssets;
+          unchecked {
+            _loss = _amountNeeded - _liquidatedAmount;
+          }
+      } else {
+          _liquidatedAmount = _amountNeeded;
+      }
+    }
+
+    function _withdrawSome(uint256 _amountWant) internal {
+        uint256 actualWithdrawn =
+            Math.min(
+                (_amountWant * 1e18) / getVirtualPrice(),
+                balanceOfLPInFarm()
+            );
+        alpacaFarm.withdraw(address(this), farmId, actualWithdrawn);
+
+        // when we withdraw from ib we got unwrapped version of the native token
+        uint256 ftmBalance = address(this).balance;
+        ibToken.withdraw(actualWithdrawn);
+        ftmBalance = address(this).balance - ftmBalance;
+        INative(address(want)).deposit{value: ftmBalance}();
     }
 
     function liquidateAllPositions() internal override returns (uint256) {
-        // TODO: Liquidate all positions and return the amount freed.
+        alpacaFarm.withdraw(address(this), farmId, balanceOfLPInFarm());
+        ibToken.withdraw(balanceOfLP());
         return want.balanceOf(address(this));
     }
 
-    // NOTE: Can override `tendTrigger` and `harvestTrigger` if necessary
-
     function prepareMigration(address _newStrategy) internal override {
-        // TODO: Transfer any non-`want` tokens to the new strategy
-        // NOTE: `migrate` will automatically forward all `want` in this strategy to the new one
+      uint256 lpBalFarming = balanceOfLPInFarm();
+      if (lpBalFarming > 0) {
+          // withdraw claims rewards and unstake all LP
+          alpacaFarm.withdraw(address(this), farmId, lpBalFarming);
+      }
+      ALPACA_TOKEN.safeTransfer(_newStrategy, ALPACA_TOKEN.balanceOf(address(this)));
+      IERC20(address(ibToken)).safeTransfer(_newStrategy, balanceOfLP());
     }
 
-    // Override this to add all tokens/tokenized positions this contract manages
-    // on a *persistent* basis (e.g. not just for swapping back to want ephemerally)
-    // NOTE: Do *not* include `want`, already included in `sweep` below
-    //
-    // Example:
-    //
-    //    function protectedTokens() internal override view returns (address[] memory) {
-    //      address[] memory protected = new address[](3);
-    //      protected[0] = tokenA;
-    //      protected[1] = tokenB;
-    //      protected[2] = tokenC;
-    //      return protected;
-    //    }
     function protectedTokens()
         internal
         view
         override
         returns (address[] memory)
-    {}
+    // solhint-disable-next-line no-empty-blocks
+    {
+
+    }
 
     /**
      * @notice
@@ -137,4 +375,29 @@ contract Strategy is BaseStrategy {
         // TODO create an accurate price oracle
         return _amtInWei;
     }
+
+    // ----------------- YSWAPS FUNCTIONS ---------------------
+
+    function setTradeFactory(address _tradeFactory) external onlyGovernance {
+        if (tradeFactory != address(0)) {
+            _removeTradeFactoryPermissions();
+        }
+
+        // approve and set up trade factory
+        ALPACA_TOKEN.safeApprove(_tradeFactory, type(uint256).max);
+        ITradeFactory tf = ITradeFactory(_tradeFactory);
+        tf.enable(address(ALPACA_TOKEN), address(want));
+        tradeFactory = _tradeFactory;
+    }
+
+    function removeTradeFactoryPermissions() external onlyEmergencyAuthorized {
+        _removeTradeFactoryPermissions();
+    }
+
+    function _removeTradeFactoryPermissions() internal {
+        ALPACA_TOKEN.safeApprove(tradeFactory, 0);
+        tradeFactory = address(0);
+    }
+
+    receive() external payable {}
 }
