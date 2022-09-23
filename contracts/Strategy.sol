@@ -25,43 +25,62 @@ contract Strategy is BaseStrategy {
 
     IibToken public ibToken;
     uint256 public farmId;
-    IFairLaunch public alpacaFarm = IFairLaunch(0x838B7F64Fa89d322C563A6f904851A13a164f84C);
+    IFairLaunch public alpacaFarm =
+        IFairLaunch(0x838B7F64Fa89d322C563A6f904851A13a164f84C);
 
     // reward token
-    IERC20 public constant ALPACA_TOKEN = IERC20(0xaD996A45fd2373ed0B10Efa4A8eCB9de445A4302);
+    IERC20 public constant ALPACA_TOKEN =
+        IERC20(0xaD996A45fd2373ed0B10Efa4A8eCB9de445A4302);
+
+    // to differentiate the want since withdrawals on wftm pools unwraps the wftm which the process
+    // of withdrawing is different than other assets
+    IERC20 public constant WFTM =
+        IERC20(0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83);
 
     // want/usd price feed, setted at constructor
     // if setted as address(0) it will default to 1e18 (DAI/USDC/USDT cases)
     IAggregatorV3 private immutable WANT_PRICE_FEED;
 
     // alpaca/usd price feed
-    IAggregatorV3 private constant ALPACA_PRICE_FEED = IAggregatorV3(0x95d3FFf86A754AB81A7c59FcaB1468A2076f8C9b);
+    IAggregatorV3 private constant ALPACA_PRICE_FEED =
+        IAggregatorV3(0x95d3FFf86A754AB81A7c59FcaB1468A2076f8C9b);
 
     // keeper stuff
     // 18 decimal dolar value (like DAI)
     uint256 public harvestProfitMin; // minimum size in dolars (18 decimals) that we want to harvest
     uint256 public harvestProfitMax; // maximum size in dolars (18 decimals) that we want to harvest
     uint256 public creditThreshold; // amount of credit in underlying tokens that will automatically trigger a harvest
-    uint256 public lastTimeETA; // what was the estimated total assets at the latest harvest
+    uint256 public lastTimeETA; // what was the estimated total assets at the latest harvest (FOR KEEPERS LOGIC)
     bool internal forceHarvestTriggerOnce; // only set this to true when we want to trigger our keepers to harvest for us
 
     address public tradeFactory = address(0);
 
-    constructor(address _vault, address _ibToken, uint256 _farmId, address _WANT_PRICE_FEED) BaseStrategy(_vault) {
-      require(IibToken(_ibToken).token() == address(want), 'IB token underlying is not want');
-      require(address(alpacaFarm.stakingToken(_farmId)) == address(_ibToken), 'Wrong ID');
+    constructor(
+        address _vault,
+        address _ibToken,
+        uint256 _farmId,
+        address _WANT_PRICE_FEED
+    ) BaseStrategy(_vault) {
+        require(
+            IibToken(_ibToken).token() == address(want),
+            "IB token underlying is not want"
+        );
+        require(
+            address(alpacaFarm.stakingToken(_farmId)) == address(_ibToken),
+            "Wrong ID"
+        );
 
-      ibToken = IibToken(_ibToken);
-      farmId = _farmId;
+        ibToken = IibToken(_ibToken);
+        farmId = _farmId;
 
-      WANT_PRICE_FEED = IAggregatorV3(_WANT_PRICE_FEED);
-      harvestProfitMin = 0; // idk what to set here
-      harvestProfitMax = 300 * 1e18; // idk what to set here aswell
-      creditThreshold = 10_000 * 1e18; // idk what to set here aswell
-      maxReportDelay = 21 days; // 21 days in seconds, if we hit this then harvestTrigger = True
+        WANT_PRICE_FEED = IAggregatorV3(_WANT_PRICE_FEED);
+        harvestProfitMin = 0; // idk what to set here
+        harvestProfitMax = 300 * 1e18; // idk what to set here aswell
+        creditThreshold = 10_000 * 1e18; // idk what to set here aswell
+        maxReportDelay = 21 days; // 21 days in seconds, if we hit this then harvestTrigger = True
 
-      IERC20(want).approve(_ibToken, type(uint256).max);
-      IERC20(_ibToken).approve(address(alpacaFarm), type(uint256).max);
+        IERC20(want).safeApprove(_ibToken, type(uint256).max);
+        IERC20(_ibToken).safeApprove(address(alpacaFarm), type(uint256).max);
     }
 
     // ******** OVERRIDE THESE METHODS FROM BASE CONTRACT ************
@@ -76,73 +95,69 @@ contract Strategy is BaseStrategy {
             );
     }
 
-    function balanceOfToken(address _token) public view returns (uint256) {
-      return IERC20(_token).balanceOf(address(this));
-    }
-
     function balanceOfWant() public view returns (uint256) {
-      return want.balanceOf(address(this));
+        return want.balanceOf(address(this));
     }
 
     function balanceOfLP() public view returns (uint256) {
-      return IERC20(address(ibToken)).balanceOf(address(this));
+        return IERC20(address(ibToken)).balanceOf(address(this));
     }
 
     function balanceOfLPInFarm() public view returns (uint256) {
-      return alpacaFarm.userInfo(farmId, address(this)).amount;
+        return alpacaFarm.userInfo(farmId, address(this)).amount;
     }
 
     function getVirtualPrice() public view returns (uint256) {
-      return (ibToken.totalToken() * 1e18) / ibToken.totalSupply();
+        return (ibToken.totalToken() * 1e18) / ibToken.totalSupply(); // 18 decimal precision
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
-        return (balanceOfLPInFarm() * getVirtualPrice()) / 1e18;
+        uint256 farmingBal = (balanceOfLPInFarm() * getVirtualPrice()) / 1e18;
+        uint256 idleBal = (balanceOfLP() * getVirtualPrice()) / 1e18;
+        return farmingBal + idleBal + balanceOfWant();
     }
 
     function pendingALPACA() public view returns (uint256) {
-      return alpacaFarm.pendingAlpaca(farmId, address(this));
+        return alpacaFarm.pendingAlpaca(farmId, address(this));
     }
 
     // return 18 decimal 1 want token price in terms of USD
     // if price feed address is 0 this will default return 1e18 (DAI/USDC/USDT cases)
     function getWantToUSD() public view returns (uint256) {
-      if (address(WANT_PRICE_FEED) == address(0)) return 1e18;
-      (
+        if (address(WANT_PRICE_FEED) == address(0)) return 1e18;
+        (
             ,
             /*uint80 roundID*/
-            int256 price, /*uint startedAt*/ /*uint timeStamp*/
+            int256 price, /*uint startedAt*/ /*uint timeStamp*/ /*uint80 answeredInRound*/
             ,
             ,
 
-        ) = /*uint80 answeredInRound*/
-            WANT_PRICE_FEED.latestRoundData();
+        ) = WANT_PRICE_FEED.latestRoundData();
         uint256 decimals = WANT_PRICE_FEED.decimals();
         return uint256(price) * 10**(18 - decimals);
     }
 
     // return 18 decimal 1 alpaca price in terms of USD
     function getAlpacaToUSD() public view returns (uint256) {
-      (
+        (
             ,
             /*uint80 roundID*/
-            int256 price, /*uint startedAt*/ /*uint timeStamp*/
+            int256 price, /*uint startedAt*/ /*uint timeStamp*/ /*uint80 answeredInRound*/
             ,
             ,
 
-        ) = /*uint80 answeredInRound*/
-            ALPACA_PRICE_FEED.latestRoundData();
+        ) = ALPACA_PRICE_FEED.latestRoundData();
         uint256 decimals = ALPACA_PRICE_FEED.decimals();
         return uint256(price) * 10**(18 - decimals);
     }
 
     // 18 decimal dolar value of profits
     function claimableProfitInUSD() public view returns (uint256) {
-      uint256 alpacasToUSD = (getAlpacaToUSD() * pendingALPACA()) / 1e18; // 18 decimal
-      uint256 swapFeeProfitsToUSD = estimatedTotalAssets() - lastTimeETA; // if underflow then dont harvest its too soon
+        uint256 alpacasToUSD = (getAlpacaToUSD() * pendingALPACA()) / 1e18; // 18 decimal
+        uint256 swapFeeProfitsToUSD = estimatedTotalAssets() - lastTimeETA; // if underflow then dont harvest its too soon
 
-      swapFeeProfitsToUSD = (swapFeeProfitsToUSD * getWantToUSD()) / 1e18; // in USD
-      return swapFeeProfitsToUSD + alpacasToUSD;
+        swapFeeProfitsToUSD = (swapFeeProfitsToUSD * getWantToUSD()) / 1e18; // in USD
+        return swapFeeProfitsToUSD + alpacasToUSD;
     }
 
     /* ========== KEEP3RS ========== */
@@ -165,7 +180,6 @@ contract Strategy is BaseStrategy {
         }
 
         // check if the base fee gas price is higher than we allow. if it is, block harvests.
-        // ASK: this is FTM chain is this necessary?
         // if (!isBaseFeeAcceptable()) {
         //     return false;
         // }
@@ -220,19 +234,16 @@ contract Strategy is BaseStrategy {
         uint256 debt = vault.strategies(address(this)).totalDebt;
         uint256 assets = estimatedTotalAssets();
         if (debt > assets) {
-          unchecked {
             _loss = debt - assets;
-          }
         } else {
-          unchecked {
             _profit = assets - debt;
-          }
         }
 
         uint256 toLiquidate = _debtOutstanding + _profit;
         if (toLiquidate > 0) {
-            (uint256 _amountFreed, uint256 _withdrawalLoss) =
-            liquidatePosition(toLiquidate);
+            (uint256 _amountFreed, uint256 _withdrawalLoss) = liquidatePosition(
+                toLiquidate
+            );
             _debtPayment = Math.min(_debtOutstanding, _amountFreed);
             _loss = _loss + _withdrawalLoss;
         }
@@ -242,45 +253,37 @@ contract Strategy is BaseStrategy {
         // net out PnL
         if (_profit > _loss) {
             unchecked {
-              _profit = _profit - _loss;
+                _profit = _profit - _loss;
             }
             _loss = 0;
         } else {
             unchecked {
-              _loss = _loss - _profit;
+                _loss = _loss - _profit;
             }
             _profit = 0;
         }
-
     }
 
     function adjustPosition(uint256 _debtOutstanding) internal override {
-       uint256 wantBalance = balanceOfWant();
-       if (wantBalance > _debtOutstanding) {
-           // supply to the pool get more ib tokens
-           unchecked {
-             uint256 toDeposit = wantBalance - _debtOutstanding;
-             ibToken.deposit(toDeposit);
-           }
-       }
-       uint256 ibTokenBal = balanceOfLP();
-       if (ibTokenBal > 0) {
-           // stake ib Tokens to earn ALPACA
-           alpacaFarm.deposit(address(this), farmId, ibTokenBal);
-       }
-    }
-
-    function _claimRewards() internal {
-        if (pendingALPACA() > 0) {
-          alpacaFarm.harvest(farmId);
+        uint256 wantBalance = balanceOfWant();
+        if (wantBalance > _debtOutstanding) {
+            // supply to the pool get more ib tokens
+            uint256 toDeposit = wantBalance - _debtOutstanding;
+            ibToken.deposit(toDeposit);
         }
-        else {
-          revert('No rewards to claim');
+        uint256 ibTokenBal = balanceOfLP();
+        if (ibTokenBal > 0) {
+            // stake ib Tokens to earn ALPACA
+            alpacaFarm.deposit(address(this), farmId, ibTokenBal);
         }
     }
 
     function claimRewards() external onlyVaultManagers {
-        _claimRewards();
+        if (pendingALPACA() > 0) {
+            alpacaFarm.harvest(farmId);
+        } else {
+            revert("No rewards to claim");
+        }
     }
 
     function liquidatePosition(uint256 _amountNeeded)
@@ -288,57 +291,68 @@ contract Strategy is BaseStrategy {
         override
         returns (uint256 _liquidatedAmount, uint256 _loss)
     {
-      uint256 wantBalance = balanceOfWant();
-      if (wantBalance > _amountNeeded) {
-          // if there is enough free want, let's use it
-          return (_amountNeeded, 0);
-      }
+        uint256 wantBalance = balanceOfWant();
+        if (wantBalance > _amountNeeded) {
+            // if there is enough free want, let's use it
+            return (_amountNeeded, 0);
+        }
 
-      // we need to free funds
-      unchecked {
+        // we need to free funds
         uint256 amountRequired = _amountNeeded - wantBalance;
         _withdrawSome(amountRequired);
-      }
-      uint256 freeAssets = balanceOfWant();
-      if (_amountNeeded > freeAssets) {
-          _liquidatedAmount = freeAssets;
-          unchecked {
-            _loss = _amountNeeded - _liquidatedAmount;
-          }
-      } else {
-          _liquidatedAmount = _amountNeeded;
-      }
+        uint256 freeAssets = balanceOfWant();
+        if (_amountNeeded > freeAssets) {
+            _liquidatedAmount = freeAssets;
+            unchecked {
+                _loss = _amountNeeded - _liquidatedAmount;
+            }
+        } else {
+            _liquidatedAmount = _amountNeeded;
+        }
     }
 
     function _withdrawSome(uint256 _amountWant) internal {
-        uint256 actualWithdrawn =
-            Math.min(
-                (_amountWant * 1e18) / getVirtualPrice(),
-                balanceOfLPInFarm()
-            );
+        uint256 actualWithdrawn = Math.min(
+            (_amountWant * 1e18) / getVirtualPrice(),
+            balanceOfLPInFarm()
+        );
         alpacaFarm.withdraw(address(this), farmId, actualWithdrawn);
 
         // when we withdraw from ib we got unwrapped version of the native token
-        uint256 ftmBalance = address(this).balance;
-        ibToken.withdraw(actualWithdrawn);
-        ftmBalance = address(this).balance - ftmBalance;
-        INative(address(want)).deposit{value: ftmBalance}();
+        if (want == WFTM) {
+            uint256 ftmBalance = address(this).balance;
+            ibToken.withdraw(actualWithdrawn);
+            ftmBalance = address(this).balance - ftmBalance;
+            INative(address(want)).deposit{value: ftmBalance}();
+        } else {
+            uint256 wantBal = balanceOfWant();
+            ibToken.withdraw(actualWithdrawn);
+            wantBal = balanceOfWant() - wantBal;
+        }
     }
 
     function liquidateAllPositions() internal override returns (uint256) {
         alpacaFarm.withdraw(address(this), farmId, balanceOfLPInFarm());
         ibToken.withdraw(balanceOfLP());
+
+        if (want == WFTM) {
+            uint256 ftmBalance = address(this).balance;
+            INative(address(want)).deposit{value: ftmBalance}();
+        }
         return want.balanceOf(address(this));
     }
 
     function prepareMigration(address _newStrategy) internal override {
-      uint256 lpBalFarming = balanceOfLPInFarm();
-      if (lpBalFarming > 0) {
-          // withdraw claims rewards and unstake all LP
-          alpacaFarm.withdraw(address(this), farmId, lpBalFarming);
-      }
-      ALPACA_TOKEN.safeTransfer(_newStrategy, ALPACA_TOKEN.balanceOf(address(this)));
-      IERC20(address(ibToken)).safeTransfer(_newStrategy, balanceOfLP());
+        uint256 lpBalFarming = balanceOfLPInFarm();
+        if (lpBalFarming > 0) {
+            // withdraw claims rewards and unstake all LP
+            alpacaFarm.withdraw(address(this), farmId, lpBalFarming);
+        }
+        ALPACA_TOKEN.safeTransfer(
+            _newStrategy,
+            ALPACA_TOKEN.balanceOf(address(this))
+        );
+        IERC20(address(ibToken)).safeTransfer(_newStrategy, balanceOfLP());
     }
 
     function protectedTokens()
