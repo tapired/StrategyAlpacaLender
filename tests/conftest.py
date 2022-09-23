@@ -41,6 +41,7 @@ def keeper(accounts):
 @pytest.fixture
 def token():
     token_address = "0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83"  # WFTM
+    #token_address = "0x04068DA6C83AFCFA0e13ba15A6696662335D5B75" # USDC
     yield Contract(token_address)
 
 
@@ -49,7 +50,8 @@ def amount(accounts, token, user):
     amount = 10_000 * 10 ** token.decimals()
     # In order to get some funds for the token you are about to use,
     # it impersonate an exchange address to use it's funds.
-    reserve = accounts.at("0x431e81E5dfB5A24541b5Ff8762bDEF3f32F96354", force=True)
+    reserve = accounts.at("0x431e81E5dfB5A24541b5Ff8762bDEF3f32F96354", force=True) # wftm whale
+    #reserve = accounts.at("0xe578C856933D8e1082740bf7661e379Aa2A30b26", force=True) # usdc whale
     token.transfer(user, amount, {"from": reserve})
     yield amount
 
@@ -62,6 +64,7 @@ def amount(accounts, token, user):
 @pytest.fixture
 def ib_token():
     ib_token_address = "0xc1018f4Bba361A1Cc60407835e156595e92EF7Ad" #ibFTM
+    #ib_token_address = "0x831332f94C4A0092040b28ECe9377AfEfF34B25a" #ibUSDC
     yield Contract(ib_token_address)
 
 @pytest.fixture
@@ -94,7 +97,8 @@ def vault(pm, gov, rewards, guardian, management, token):
 
 @pytest.fixture
 def strategy(strategist, keeper, vault, Strategy, gov, ib_token, want_price_feed):
-    strategy = strategist.deploy(Strategy, vault, ib_token, 1, want_price_feed)
+    strategy = strategist.deploy(Strategy, vault, ib_token, 1, want_price_feed) # wftm
+    #strategy = strategist.deploy(Strategy, vault, ib_token, 3, want_price_feed) # usdc
     strategy.setKeeper(keeper)
     vault.addStrategy(strategy, 10_000, 0, 2 ** 256 - 1, 1_000, {"from": gov})
     yield strategy
@@ -111,8 +115,12 @@ def ymechs_safe():
     yield Contract("0x9f2A061d6fEF20ad3A656e23fd9C814b75fd5803")
 
 @pytest.fixture
-def zrx_swapper():
-    yield Contract('0x0a94017DF3f8981Da97D79c28b103bAbDa0D67C7')
+def unirouter(): # SPOOKY SWAP
+    yield Contract("0xF491e7B69E4244ad4002BC14e878a34207E38c29")
+
+@pytest.fixture
+def multicall_swapper():
+    yield Contract('0x590B3e12Ded77dE66CBF45050cD07a65d1F51dDD')
 
 @pytest.fixture
 def prepare_trade_factory(strategy, trade_factory, ymechs_safe, gov):
