@@ -156,7 +156,7 @@ contract Strategy is BaseStrategy {
         uint256 alpacasToUSD = (getAlpacaToUSD() * pendingALPACA()) / 1e18; // 18 decimal
         uint256 swapFeeProfitsToUSD = estimatedTotalAssets() - lastTimeETA; // if underflow then dont harvest its too soon
 
-        swapFeeProfitsToUSD = (swapFeeProfitsToUSD * getWantToUSD()) / 1e18; // in USD
+        swapFeeProfitsToUSD = (swapFeeProfitsToUSD * getWantToUSD()) / 10**(vault.decimals()); // in USD 18 decimal precision
         return swapFeeProfitsToUSD + alpacasToUSD;
     }
 
