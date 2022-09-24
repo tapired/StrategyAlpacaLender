@@ -74,10 +74,10 @@ contract Strategy is BaseStrategy {
         farmId = _farmId;
 
         WANT_PRICE_FEED = IAggregatorV3(_WANT_PRICE_FEED);
-        harvestProfitMin = 0; // idk what to set here
-        harvestProfitMax = 300 * 1e18; // idk what to set here aswell
-        creditThreshold = 10_000 * 1e18; // idk what to set here aswell
-        maxReportDelay = 21 days; // 21 days in seconds, if we hit this then harvestTrigger = True
+        harvestProfitMin = 100 * 1e18; // every 100$ harvest, remember alpaca-wftm pool is not big to absorve big swaps so we swap often rather than bulk
+        harvestProfitMax = 300 * 1e18; // 300$ is max
+        creditThreshold = 10_000 * 1e18;
+        maxReportDelay = 10 days; // 10 days in seconds, if we hit this then harvestTrigger = True
 
         IERC20(want).safeApprove(_ibToken, type(uint256).max);
         IERC20(_ibToken).safeApprove(address(alpacaFarm), type(uint256).max);
@@ -345,9 +345,11 @@ contract Strategy is BaseStrategy {
     function prepareMigration(address _newStrategy) internal override {
         uint256 lpBalFarming = balanceOfLPInFarm();
         if (lpBalFarming > 0) {
-            // withdraw claims rewards and unstake all LP
+            // withdraw unstakes all LP
             alpacaFarm.withdraw(address(this), farmId, lpBalFarming);
         }
+        // take the rewards with us
+        alpacaFarm.harvest(farmId);
         ALPACA_TOKEN.safeTransfer(
             _newStrategy,
             ALPACA_TOKEN.balanceOf(address(this))
