@@ -50,7 +50,6 @@ contract Strategy is BaseStrategy {
     uint256 public harvestProfitMin; // minimum size in dolars (18 decimals) that we want to harvest
     uint256 public harvestProfitMax; // maximum size in dolars (18 decimals) that we want to harvest
     uint256 public creditThreshold; // amount of credit in underlying tokens that will automatically trigger a harvest
-    uint256 public lastTimeETA; // what was the estimated total assets at the latest harvest (FOR KEEPERS LOGIC)
     bool internal forceHarvestTriggerOnce; // only set this to true when we want to trigger our keepers to harvest for us
 
     address public tradeFactory = address(0);
@@ -121,22 +120,6 @@ contract Strategy is BaseStrategy {
         return alpacaFarm.pendingAlpaca(farmId, address(this));
     }
 
-    // return 18 decimal 1 want token price in terms of USD
-    // if price feed address is 0 this will default return 1e18 (DAI/USDC/USDT cases)
-    function getWantToUSD() public view returns (uint256) {
-        if (address(WANT_PRICE_FEED) == address(0)) return 1e18;
-        (
-            ,
-            /*uint80 roundID*/
-            int256 price, /*uint startedAt*/ /*uint timeStamp*/ /*uint80 answeredInRound*/
-            ,
-            ,
-
-        ) = WANT_PRICE_FEED.latestRoundData();
-        uint256 decimals = WANT_PRICE_FEED.decimals();
-        return uint256(price) * 10**(18 - decimals);
-    }
-
     // return 18 decimal 1 alpaca price in terms of USD
     function getAlpacaToUSD() public view returns (uint256) {
         (
@@ -154,10 +137,7 @@ contract Strategy is BaseStrategy {
     // 18 decimal dolar value of profits
     function claimableProfitInUSD() public view returns (uint256) {
         uint256 alpacasToUSD = (getAlpacaToUSD() * pendingALPACA()) / 1e18; // 18 decimal
-        uint256 swapFeeProfitsToUSD = estimatedTotalAssets() - lastTimeETA; // if underflow then dont harvest its too soon
-
-        swapFeeProfitsToUSD = (swapFeeProfitsToUSD * getWantToUSD()) / 10**(vault.decimals()); // in USD 18 decimal precision
-        return swapFeeProfitsToUSD + alpacasToUSD;
+        return alpacasToUSD;
     }
 
     /* ========== KEEP3RS ========== */
@@ -220,6 +200,10 @@ contract Strategy is BaseStrategy {
         creditThreshold = _creditThreshold;
     }
 
+    function setForceHarvestTriggerOnce(bool _forceHarvestTriggerOnce) external onlyAuthorized {
+      forceHarvestTriggerOnce = _forceHarvestTriggerOnce;
+    }
+
     function prepareReturn(uint256 _debtOutstanding)
         internal
         override
@@ -247,8 +231,6 @@ contract Strategy is BaseStrategy {
             _debtPayment = Math.min(_debtOutstanding, _amountFreed);
             _loss = _loss + _withdrawalLoss;
         }
-
-        lastTimeETA = estimatedTotalAssets(); // for keepers
 
         // net out PnL
         if (_profit > _loss) {
